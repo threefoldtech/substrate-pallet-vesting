@@ -125,6 +125,8 @@ decl_storage! {
 		pub Vesting get(fn vesting):
 			map hasher(blake2_128_concat) T::AccountId
 			=> Option<VestingInfo<BalanceOf<T>, T::BlockNumber>>;
+
+		pub AccountsVesting get(fn accounts_vesting): Vec<T::AccountId>;
 	}
 	add_extra_genesis {
 		config(vesting): Vec<(T::AccountId, T::BlockNumber, T::BlockNumber, BalanceOf<T>)>;
@@ -373,9 +375,22 @@ impl<T: Config> VestingSchedule<T::AccountId> for Module<T> where
 			starting_block
 		};
 		Vesting::<T>::insert(who, vesting_schedule);
+
+		let mut vesters = AccountsVesting::<T>::get();
+
 		// it can't fail, but even if somehow it did, we don't really care.
 		let _ = Self::update_lock(who.clone());
-		Ok(())
+		match vesters.binary_search(&who) {
+			// If the search succeeds, the caller is already a member, so just return
+			Ok(_) => Err(Error::<T>::ExistingVestingSchedule.into()),
+			// If the search fails, the caller is not a member and we learned the index where
+			// they should be inserted
+			Err(index) => {
+				vesters.insert(index, who.clone());
+				AccountsVesting::<T>::put(vesters);
+				Ok(())
+			}
+		}
 	}
 
 	/// Remove a vesting schedule for a given account.
