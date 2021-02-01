@@ -56,13 +56,15 @@ use codec::{Encode, Decode};
 use sp_runtime::{DispatchResult, RuntimeDebug, traits::{
 	StaticLookup, Zero, AtLeast32BitUnsigned, MaybeSerializeDeserialize, Convert
 }};
-use frame_support::{decl_module, decl_event, decl_storage, decl_error, ensure};
+use frame_support::{decl_module, decl_event, decl_storage, decl_error, ensure, debug};
 use frame_support::traits::{
-	Currency, LockableCurrency, VestingSchedule, WithdrawReason, LockIdentifier,
+	Currency, LockableCurrency, WithdrawReason, LockIdentifier,
 	ExistenceRequirement, Get,
 };
 use frame_system::{ensure_signed, ensure_root};
+use fixed::{types::U16F16};
 pub use weights::WeightInfo;
+use pallet_tft_price_oracle;
 
 type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::Balance;
 type MaxLocksOf<T> = <<T as Config>::Currency as LockableCurrency<<T as frame_system::Trait>::AccountId>>::MaxLocks;
@@ -84,6 +86,41 @@ pub trait Config: frame_system::Trait {
 	type WeightInfo: WeightInfo;
 }
 
+/// A vesting schedule over a currency. This allows a particular currency to have vesting limits
+/// applied to it.
+pub trait VestingSchedule<AccountId> {
+	/// The quantity used to denote time; usually just a `BlockNumber`.
+	type Moment;
+
+	/// The currency that this schedule applies to.
+	type Currency: Currency<AccountId>;
+
+	/// Get the amount that is currently being vested and cannot be transferred out of this account.
+	/// Returns `None` if the account has no vesting schedule.
+	fn vesting_balance(who: &AccountId) -> Option<<Self::Currency as Currency<AccountId>>::Balance>;
+
+	/// Adds a vesting schedule to a given account.
+	///
+	/// If there already exists a vesting schedule for the given account, an `Err` is returned
+	/// and nothing is updated.
+	///
+	/// Is a no-op if the amount to be vested is zero.
+	///
+	/// NOTE: This doesn't alter the free balance of the account.
+	fn add_vesting_schedule(
+		who: &AccountId,
+		locked: <Self::Currency as Currency<AccountId>>::Balance,
+		per_block: <Self::Currency as Currency<AccountId>>::Balance,
+		starting_block: Self::Moment,
+		tft_price: U16F16,
+	) -> DispatchResult;
+
+	/// Remove a vesting schedule for a given account.
+	///
+	/// NOTE: This doesn't alter the free balance of the account.
+	fn remove_vesting_schedule(who: &AccountId);
+}
+
 const VESTING_ID: LockIdentifier = *b"vesting ";
 
 /// Struct to encode the vesting schedule of an individual account.
@@ -95,6 +132,8 @@ pub struct VestingInfo<Balance, BlockNumber> {
 	pub per_block: Balance,
 	/// Starting block for unlocking(vesting).
 	pub starting_block: BlockNumber,
+	/// TFT price limit to unlock vesting
+	pub tft_price: U16F16,
 }
 
 impl<
@@ -148,7 +187,8 @@ decl_storage! {
 				Vesting::<T>::insert(who, VestingInfo {
 					locked: locked,
 					per_block: per_block,
-					starting_block: begin
+					starting_block: begin,
+					tft_price: U16F16::from_num(0.20),
 				});
 				let reasons = WithdrawReason::Transfer | WithdrawReason::Reserve;
 				T::Currency::set_lock(VESTING_ID, who, locked, reasons);
@@ -264,7 +304,7 @@ decl_module! {
 
 			T::Currency::transfer(&transactor, &who, schedule.locked, ExistenceRequirement::AllowDeath)?;
 
-			Self::add_vesting_schedule(&who, schedule.locked, schedule.per_block, schedule.starting_block)
+			Self::add_vesting_schedule(&who, schedule.locked, schedule.per_block, schedule.starting_block, schedule.tft_price)
 				.expect("user does not have an existing vesting schedule; q.e.d.");
 
 			Ok(())
@@ -303,11 +343,18 @@ decl_module! {
 
 			T::Currency::transfer(&source, &target, schedule.locked, ExistenceRequirement::AllowDeath)?;
 
-			Self::add_vesting_schedule(&target, schedule.locked, schedule.per_block, schedule.starting_block)
+			Self::add_vesting_schedule(&target, schedule.locked, schedule.per_block, schedule.starting_block, schedule.tft_price)
 				.expect("user does not have an existing vesting schedule; q.e.d.");
 
 			Ok(())
 		}
+
+		fn offchain_worker(block_number: T::BlockNumber) {
+			match Self::check_vesting_unlocks() {
+				Ok(_) => debug::info!("worker executed"),
+				Err(err) => debug::info!("err: {:?}", err)
+			}
+        }
 	}
 }
 
@@ -328,6 +375,32 @@ impl<T: Config> Module<T> {
 			T::Currency::set_lock(VESTING_ID, &who, locked_now, reasons);
 			Self::deposit_event(RawEvent::VestingUpdated(who, locked_now));
 		}
+		Ok(())
+	}
+
+	fn check_vesting_unlocks() -> DispatchResult {
+		let tft_price = pallet_tft_price_oracle::TftPrice::get();
+		debug::info!("checking if accounts need to be unlocked, tft price: {:?}", tft_price);
+
+		let vesters = AccountsVesting::<T>::get();
+
+		for vesting_account in vesters {
+			debug::info!("fetching vesting schedule for account: {:?}", vesting_account);
+			let schedule = Vesting::<T>::get(&vesting_account);
+
+			match schedule {
+				Some(stored_schedule) => {
+					debug::info!("configured tft price in schedule: {:?}", stored_schedule.tft_price);
+					debug::info!("schedule: {:?}", stored_schedule);
+					if tft_price > stored_schedule.tft_price {
+						debug::info!("check to unlock schedule");
+					}
+				},
+				None => ()
+			}
+
+		}
+
 		Ok(())
 	}
 }
@@ -363,7 +436,8 @@ impl<T: Config> VestingSchedule<T::AccountId> for Module<T> where
 		who: &T::AccountId,
 		locked: BalanceOf<T>,
 		per_block: BalanceOf<T>,
-		starting_block: T::BlockNumber
+		starting_block: T::BlockNumber,
+		tft_price: U16F16
 	) -> DispatchResult {
 		if locked.is_zero() { return Ok(()) }
 		if Vesting::<T>::contains_key(who) {
@@ -372,7 +446,8 @@ impl<T: Config> VestingSchedule<T::AccountId> for Module<T> where
 		let vesting_schedule = VestingInfo {
 			locked,
 			per_block,
-			starting_block
+			starting_block,
+			tft_price
 		};
 		Vesting::<T>::insert(who, vesting_schedule);
 
@@ -413,9 +488,10 @@ mod tests {
 		traits::{BlakeTwo256, IdentityLookup, Identity, BadOrigin},
 	};
 	use frame_system::RawOrigin;
+	use pallet_balances;
 
 	type UncheckedExtrinsic = frame_system::mocking::MockUncheckedExtrinsic<Test>;
-	type Block = frame_system::mocking::MockBlock<Test>;
+	type Block = frame_system::mock::MockBlock<Test>;
 
 	frame_support::construct_runtime!(
 		pub enum Test where
@@ -461,7 +537,7 @@ mod tests {
 	parameter_types! {
 		pub const MaxLocks: u32 = 10;
 	}
-	impl pallet_balances::Config for Test {
+	impl pallet_balances::Trait for Test {
 		type Balance = u64;
 		type DustRemoval = ();
 		type Event = Event;
@@ -498,7 +574,7 @@ mod tests {
 			self
 		}
 		pub fn build(self) -> sp_io::TestExternalities {
-			EXISTENTIAL_DEPOSIT.with(|v| *v.borrow_mut() = self.existential_deposit);
+			ExistentialDeposit.with(|v| *v.borrow_mut() = self.existential_deposit);
 			let mut t = frame_system::GenesisConfig::default().build_storage::<Test>().unwrap();
 			pallet_balances::GenesisConfig::<Test> {
 				balances: vec![

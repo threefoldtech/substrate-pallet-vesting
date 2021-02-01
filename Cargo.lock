@@ -1127,6 +1127,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-tft-price-oracle"
+version = "2.0.1"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "lite-json",
+ "pallet-balances",
+ "pallet-timestamp",
+ "parity-scale-codec",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+ "sp-std",
+ "sp-storage",
+ "substrate-fixed",
+]
+
+[[package]]
 name = "pallet-timestamp"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1156,6 +1174,7 @@ dependencies = [
  "hex-literal",
  "lite-json",
  "pallet-balances",
+ "pallet-tft-price-oracle",
  "pallet-timestamp",
  "parity-scale-codec",
  "serde",
@@ -1164,6 +1183,7 @@ dependencies = [
  "sp-runtime",
  "sp-std",
  "sp-storage",
+ "substrate-fixed",
 ]
 
 [[package]]
@@ -2116,6 +2136,15 @@ dependencies = [
  "schnorrkel",
  "sha2 0.8.2",
  "zeroize",
+]
+
+[[package]]
+name = "substrate-fixed"
+version = "0.5.5"
+source = "git+https://github.com/encointer/substrate-fixed#0f773e2524315f688d15df8b027777bde7b6f433"
+dependencies = [
+ "parity-scale-codec",
+ "typenum",
 ]
 
 [[package]]
